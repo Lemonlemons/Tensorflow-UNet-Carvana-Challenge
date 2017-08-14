@@ -4,27 +4,21 @@ from .layers import *
 import numpy as np
 import tensorflow as tf
 
-class DNN1Model(BaseModel):
+class Unet1024(BaseModel):
 
   def build(self, stats):
     # image shape
-    self.image_input_shape = (1024, 1024, 3)
+    self.image_input_shape = [1024, 1024, 3]
     # mask shape
-    self.mask_input_shape = (1024, 1024, 1)
+    self.mask_input_shape = [1024, 1024, 1]
     # number of classes
     self.num_classes = 1
-    # batch size
-    if self.is_testing or self.is_training:
-      self.batch_size = 16
-    else:
-      self.batch_size = 1
-    self.learning_rate = 1e-4
 
     # Build our dataflow graph.
     self.GRAPH = tf.Graph()
     with self.GRAPH.as_default():
-      self.IMAGES, self.MASKS = self.read_inputs([self.input_file], images_shape=self.image_input_shape, masks_shape=self.mask_input_shape,
-        batch_size=self.batch_size, capacity=10000, min_after_dequeue=self.batch_size,
+      IMAGES, MASKS = self.read_inputs([self.input_file], images_shape=[np.prod(self.image_input_shape)], masks_shape=[np.prod(self.mask_input_shape)],
+        batch_size=self.batch_size, capacity=100, min_after_dequeue=self.batch_size,
         num_threads=self.input_pipeline_threads, is_training=(self.is_training or self.is_testing)
       )
 
@@ -33,37 +27,42 @@ class DNN1Model(BaseModel):
       print('training set count: ' + str(training_set_count))
       print('test set count: ' + str(test_set_count))
 
-      # make them into "magnitude spectograms"
-      self.CORRECTED_SPECTOGRAMS = tf.abs(self.SPECTOGRAMS)
+      IMAGES = tf.reshape(IMAGES, [self.batch_size] + self.image_input_shape)
+      MASKS = tf.reshape(MASKS, [self.batch_size] + self.mask_input_shape)
 
-      # Build feedforward layers.
-      # This first layer is supposed to be a "locally_connected" layer however tensorflow doesn't have an implementation of that.
-      with tf.variable_scope('fully_connected_1') as scope:
-        H_1 = fc_dropout_layer(self.CORRECTED_SPECTOGRAMS, np.prod(self.spectograms_shape), self.n_cells, scope, self.keep_prob, is_training=self.is_training, act_func=selu)
-      with tf.variable_scope('fully_connected_2') as scope:
-        H_2 = fc_dropout_layer(H_1, self.n_cells, self.n_cells, scope, self.keep_prob, is_training=self.is_training, act_func=selu)
-      with tf.variable_scope('fully_connected_3') as scope:
-        H_3 = fc_dropout_layer(H_2, self.n_cells, self.n_cells, scope, self.keep_prob, is_training=self.is_training, act_func=selu)
-      with tf.variable_scope('fully_connected_4') as scope:
-        self.LOGITS = fc_layer(H_3, self.n_cells, self.n_classes, scope, is_training=self.is_training)
-      self.Y = tf.nn.sigmoid(self.LOGITS)
+      # Build convolutional layers.
+      down0b, down0b_pool = unet_down_layer_group(IMAGES, 'conv_down_8', 8, selu, self.is_training)
+      down0a, down0a_pool = unet_down_layer_group(down0b_pool, 'conv_down_16', 16, selu, self.is_training)
+      down0, down0_pool = unet_down_layer_group(down0a_pool, 'conv_down_32', 32, selu, self.is_training)
+      down1, down1_pool = unet_down_layer_group(down0_pool, 'conv_down_64', 64, selu, self.is_training)
+      down2, down2_pool = unet_down_layer_group(down1_pool, 'conv_down_128', 128, selu, self.is_training)
+      down3, down3_pool = unet_down_layer_group(down2_pool, 'conv_down_256', 256, selu, self.is_training)
+      down4, down4_pool = unet_down_layer_group(down3_pool, 'conv_down_512', 512, selu, self.is_training)
 
-      print(self.LOGITS.shape)
+      center = unet_center_layer_group(down4_pool, 'center', 1024, selu, self.is_training)
+
+      up4 = unet_up_layer_group(center, 'conv_up_512', 512, selu, self.is_training, down4)
+      up3 = unet_up_layer_group(up4, 'conv_up_256', 256, selu, self.is_training, down3)
+      up2 = unet_up_layer_group(up3, 'conv_up_128', 128, selu, self.is_training, down2)
+      up1 = unet_up_layer_group(up2, 'conv_up_64', 64, selu, self.is_training, down1)
+      up0 = unet_up_layer_group(up1, 'conv_up_32', 32, selu, self.is_training, down0)
+      up0a = unet_up_layer_group(up0, 'conv_up_16', 16, selu, self.is_training, down0a)
+      up0b = unet_up_layer_group(up0a, 'conv_up_8', 8, selu, self.is_training, down0b)
+
+      with tf.variable_scope('output') as scope:
+        self.Y = conv2d_layer(up0b, shape=[1, 1, 3, 1], scope=scope,
+                             layer_count=1, act_func=tf.nn.sigmoid, is_training=self.is_training)
 
       # Compute the cross entropy loss.
-      self.COST = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
-        labels=self.MASKS, logits=self.LOGITS
-      ))
-
+      self.COST = tf.reduce_mean(self.bce_dice_loss(MASKS, self.Y))
       tf.summary.scalar("cost", self.COST)
 
-      # Compute the accuracy
-      self.ACCURACY = tf.subtract(tf.cast(1.0, tf.float64), tf.reduce_mean(tf.abs(tf.subtract(self.Y, self.MASKS))))
-      tf.summary.scalar("accuracy", self.ACCURACY)
+      # Watch the Dice Loss by itself
+      self.DICE_LOSS = tf.reduce_mean(self.dice_loss(MASKS, self.Y))
+      tf.summary.scalar("dice loss", self.DICE_LOSS)
 
       # Compute gradients.
       OPTIMIZER = tf.train.AdamOptimizer(self.learning_rate)
-
       GRADIENTS = OPTIMIZER.compute_gradients(self.COST)
 
       # Apply gradients.

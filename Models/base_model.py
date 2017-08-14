@@ -19,6 +19,7 @@ import requests
 
 class BaseModel(object):
   def __init__(self, args, stats, input_file):
+    training_count, testing_count = stats
     self.mode = args.phase
     self.delete_old = args.delete_old == 'True'
     self.model = args.model
@@ -26,10 +27,15 @@ class BaseModel(object):
     self.is_training = self.mode == 'train'
     self.is_testing = self.mode == 'test'
     self.input_file = input_file
-    self.num_batches = 9 # int(num_of_examples/self.batch_size)
-    self.num_epochs = 3000
+    if self.is_testing or self.is_training:
+      self.batch_size = 6
+    else:
+      self.batch_size = 1
+    self.num_batches = 9 # int(training_count/self.batch_size)
+    self.num_epochs = 2000
+    self.learning_rate = 1e-5
 
-    self.input_pipeline_threads = 1
+    self.input_pipeline_threads = 2
     self.graph_config = tf.ConfigProto(allow_soft_placement=True,
                                        log_device_placement=False,
                                        inter_op_parallelism_threads=5,
@@ -74,15 +80,15 @@ class BaseModel(object):
 
       TOTAL_DURATION = 0.0
       GLOBAL_STEP = 0
-      BEST_ACC = 0.0
+      BEST_COST = 0.0
       for EPOCH in range(self.num_epochs):
         DURATION = 0
         ERROR = 0.0
         ACC = 0.0
         START_TIME = time.time()
         for MINI_BATCH in range(self.num_batches):
-          _, SUMMARIES, COST_VAL, ACC, = SESSION.run([
-            self.APPLY_GRADIENT_OP, self.SUMMARIES_OP, self.COST, self.ACCURACY
+          _, SUMMARIES, COST_VAL, DICE_LOSS = SESSION.run([
+            self.APPLY_GRADIENT_OP, self.SUMMARIES_OP, self.COST, self.DICE_LOSS
           ])
           ERROR += COST_VAL
           GLOBAL_STEP += 1
@@ -92,235 +98,19 @@ class BaseModel(object):
         DURATION += time.time() - START_TIME
         TOTAL_DURATION += DURATION
         # Update the console.
-        print('Epoch %d: loss = %.4f (%.3f sec) , acc = %.8f' % (EPOCH, ERROR, DURATION, ACC))
-        if EPOCH % 25 == 0 and EPOCH != 0 and ACC > BEST_ACC:
-          BEST_ACC = ACC
+        print('Epoch %d: loss = %.4f (%.3f sec), dice loss = %.8f' % (EPOCH, ERROR, DURATION, DICE_LOSS))
+        if EPOCH != 0 and DICE_LOSS > BEST_COST:
+          BEST_COST = DICE_LOSS
           print('Saving Session')
           GRAPH_SAVER.save(SESSION, self.model_file)
-        if EPOCH == self.num_epochs or ERROR < 0.005:
-          print(
-            'Done training for %d epochs. (%.3f sec) total steps %d' % (EPOCH, TOTAL_DURATION, GLOBAL_STEP)
-          )
-          break
-      if ACC > BEST_ACC:
-        print('Saving Session')
-        GRAPH_SAVER.save(SESSION, self.model_file)
+        # if EPOCH == self.num_epochs or ERROR < 0.005:
+        #   print(
+        #     'Done training for %d epochs. (%.3f sec) total steps %d' % (EPOCH, TOTAL_DURATION, GLOBAL_STEP)
+        #   )
+        #   break
       print('Training Done!')
       COORDINATOR.request_stop()
       COORDINATOR.join(THREADS)
-
-  # generate the training data for dnn2
-  def gen(self, gen_data_file, gen_meta_file, number_of_stacked_frames, set_two_count):
-    print('generating data')
-
-    writer = tf.python_io.TFRecordWriter(gen_data_file)
-
-    with tf.Session(graph=self.GRAPH, config=self.graph_config) as SESSION:
-      COORDINATOR = tf.train.Coordinator()
-      THREADS = tf.train.start_queue_runners(SESSION, COORDINATOR)
-
-      # restore the session
-      GRAPH_WRITER = tf.train.Saver()
-      GRAPH_WRITER.restore(SESSION, self.model_file)
-
-      batch_count = set_two_count / self.batch_size
-      print('set two count')
-      print(set_two_count)
-      print('batch count')
-      print(batch_count)
-
-      HIGHEST_GUESS = 0.0
-      HIGHEST_TRUTH = 0.0
-
-      for EPOCH in range(int(batch_count)):
-        ESTIMATED_MASKS, SPECTOGRAMS, MASKS = SESSION.run([
-          self.Y, self.SPECTOGRAMS, self.MASKS
-        ])
-
-        if (EPOCH % 100 == 0):
-          print(EPOCH)
-
-        for index, ESTIMATED_MASK in enumerate(ESTIMATED_MASKS):
-          guessed_combo_matrix = self.single_mask_estimate(ESTIMATED_MASK, SPECTOGRAMS[index])
-
-          true_combo_matrix = self.single_mask_estimate(MASKS[index], SPECTOGRAMS[index])
-
-          largest_guess = np.amax(np.absolute(guessed_combo_matrix))
-          largest_truth = np.amax(np.absolute(true_combo_matrix))
-
-          if (largest_guess > HIGHEST_GUESS):
-            HIGHEST_GUESS = largest_guess
-          elif (largest_truth > HIGHEST_TRUTH):
-            HIGHEST_TRUTH = largest_truth
-
-          guessed_combo_matrix = guessed_combo_matrix.astype(np.float64, copy=False)
-          true_combo_matrix = true_combo_matrix.astype(np.float64, copy=False)
-
-          vocal_matrix, nonvocal_matrix = np.split(guessed_combo_matrix, 2, axis=0)
-          vocal_matrices = np.split(vocal_matrix, number_of_stacked_frames, axis=0)
-          nonvocal_matrices = np.split(nonvocal_matrix, number_of_stacked_frames, axis=0)
-
-          true_vocal_matrix, true_nonvocal_matrix = np.split(true_combo_matrix, 2, axis=0)
-          true_vocal_matrices = np.split(true_vocal_matrix, number_of_stacked_frames, axis=0)
-          true_nonvocal_matrices = np.split(true_nonvocal_matrix, number_of_stacked_frames, axis=0)
-
-          for innerindex, matrix in enumerate(vocal_matrices):
-            guessed_combo_matrix = np.concatenate((matrix, nonvocal_matrices[innerindex]), axis=0)
-            true_combo_matrix = np.concatenate((true_vocal_matrices[innerindex], true_nonvocal_matrices[innerindex]), axis=0)
-
-            # Write the final input frames and binary_mask to disk.
-            example = tf.train.Example(features=tf.train.Features(feature={
-              'guess': bytes_feature(guessed_combo_matrix.flatten().tostring()),
-              'truth': bytes_feature(true_combo_matrix.flatten().tostring())
-            }))
-            writer.write(example.SerializeToString())
-
-      print('highest guess')
-      print(HIGHEST_GUESS)
-      print('highest truth')
-      print(HIGHEST_TRUTH)
-
-      with open(gen_meta_file, 'w') as OUTPUT:
-        OUTPUT.write('{},{}'.format(HIGHEST_GUESS, HIGHEST_TRUTH))
-
-      COORDINATOR.request_stop()
-      COORDINATOR.join(THREADS)
-
-    writer.close()
-    print('generation complete')
-
-  def get_second_model_input(self, SPECTOGRAMS, configs):
-    print('Getting input for Second Model')
-    with tf.Session(graph=self.GRAPH, config=self.graph_config) as SESSION:
-
-      # restore the session
-      GRAPH_WRITER = tf.train.Saver()
-      GRAPH_WRITER.restore(SESSION, self.model_file)
-
-      ESTIMATED_MASKS = []
-      COMBO_MATRICES = []
-      VOCALS = []
-      NONVOCALS = []
-      # PHASE_INDEXS = [1024, 2049, 3074, 4099, 5124]
-      PHASE_COMPONENTS = []
-
-      print('size')
-      print(len(SPECTOGRAMS))
-
-      for index, SPECTOGRAM in enumerate(SPECTOGRAMS):
-        mask = SESSION.run(self.Y, feed_dict={self.spectograms: [SPECTOGRAM]})
-        ESTIMATED_MASKS.append(mask)
-        # PHASE_COMPONENTS.append([])
-        # for component_idx in PHASE_INDEXS:
-        #   PHASE_COMPONENTS[index].append(SPECTOGRAM[component_idx].astype(np.float64))
-
-        if (index % 100 == 0):
-          print(index)
-
-      for index, ESTIMATED_MASK in enumerate(ESTIMATED_MASKS):
-
-        guessed_combo_matrix = self.single_mask_estimate(ESTIMATED_MASK, SPECTOGRAMS[index])
-
-        guessed_combo_matrix = guessed_combo_matrix.astype(np.float64, copy=False)
-
-        vocal_matrix, nonvocal_matrix = np.split(guessed_combo_matrix, 2, axis=0)
-        vocal_matrices = np.split(vocal_matrix, configs['STACKED_FRAMES'], axis=0)
-        nonvocal_matrices = np.split(nonvocal_matrix, configs['STACKED_FRAMES'], axis=0)
-
-        for innerindex, vocal_matrix in enumerate(vocal_matrices):
-          guessed_combo_matrix = np.concatenate((vocal_matrix, nonvocal_matrices[innerindex]), axis=0)
-          COMBO_MATRICES.append(guessed_combo_matrix)
-
-          vocal_matrix = np.array([vocal_matrix], dtype=np.float64)
-          nonvocal_matrix = np.array([nonvocal_matrices[innerindex]], dtype=np.float64)
-          # vocal_matrix[0][-1] = PHASE_COMPONENTS[index][innerindex]
-          # nonvocal_matrix[0][-1] = PHASE_COMPONENTS[index][innerindex]
-
-          VOCALS.append(vocal_matrix)
-          NONVOCALS.append(nonvocal_matrix)
-
-      VOCAL_FRAMES = np.concatenate(VOCALS).T
-      NONVOCAL_FRAMES = np.concatenate(NONVOCALS).T
-
-      print('vocal and nonvocal array shapes')
-      print(VOCAL_FRAMES.shape)
-      print(NONVOCAL_FRAMES.shape)
-
-      VOCAL_SIGNALS = istft(VOCAL_FRAMES, configs=configs)
-      NONVOCAL_SIGNALS = istft(NONVOCAL_FRAMES, configs=configs)
-
-      librosa.output.write_wav("vocal4.wav", VOCAL_SIGNALS, sr=configs['SAMPLE_RATE'])
-      librosa.output.write_wav("nonvocal4.wav", NONVOCAL_SIGNALS, sr=configs['SAMPLE_RATE'])
-
-      return COMBO_MATRICES, PHASE_COMPONENTS
-
-  def single_mask_estimate(self, estimated_mask, spectogram):
-    # create the masks for nonvocal
-    estimated_nonvocal_mask = np.absolute(np.subtract(estimated_mask, 1.0))
-
-    # create the guessed vocal and nonvocal combo matrix
-    guessed_vocals = np.multiply(estimated_mask, spectogram)
-    guessed_nonvocals = np.multiply(estimated_nonvocal_mask, spectogram)
-    guessed_combo_matrix = np.concatenate((guessed_vocals, guessed_nonvocals))
-
-    return guessed_combo_matrix.flatten()
-
-  def dual_mask_estimate(self, estimated_mask, spectogram):
-    # create the masks for nonvocal
-    vocal_guessed_mask, nonvocal_guessed_mask = np.split(estimated_mask[0], 2, axis=0)
-
-    # create the guessed vocal and nonvocal combo matrix
-    guessed_vocals = np.multiply(vocal_guessed_mask, spectogram)
-    guessed_nonvocals = np.multiply(nonvocal_guessed_mask, spectogram)
-    guessed_combo_matrix = np.concatenate((guessed_vocals, guessed_nonvocals))
-
-    return guessed_combo_matrix.flatten()
-
-  def refine_matrices_and_output(self, combo_matrices, phase_components, configs, stats):
-    print('Getting input for Second Model')
-
-    VOCAL_FRAMES = []
-    NONVOCAL_FRAMES = []
-
-    GUESS_MAX, TRUTH_MAX = stats
-
-    with tf.Session(graph=self.GRAPH, config=self.graph_config) as SESSION:
-      # restore the session
-      GRAPH_WRITER = tf.train.Saver()
-      GRAPH_WRITER.restore(SESSION, self.model_file)
-
-      print('size')
-      print(len(combo_matrices))
-
-      for index, combo_matrix in enumerate(combo_matrices):
-        sign_matrix = np.sign([combo_matrix])
-
-        # max_matrix = np.amax(norm_combo_matrix)
-        # corrected_combo_matrix = norm_combo_matrix / max_matrix
-
-        refined_matrix, norm_array = SESSION.run([self.Y, self.TRUTH_NORM], feed_dict={self.guesses: [combo_matrix]})
-        refined_matrix = np.multiply(refined_matrix, sign_matrix)
-        refined_matrix = np.multiply(refined_matrix, norm_array)
-        vocal_matrix, nonvocal_matrix = np.split(refined_matrix, 2, axis=1)
-        # vocal_matrix[0][-1] = phase_components[index]
-        # nonvocal_matrix[0][-1] = phase_components[index]
-        VOCAL_FRAMES.append(vocal_matrix)
-        NONVOCAL_FRAMES.append(nonvocal_matrix)
-        if (index % 100 == 0):
-          print(index)
-
-    VOCAL_FRAMES = np.concatenate(VOCAL_FRAMES).T
-    NONVOCAL_FRAMES = np.concatenate(NONVOCAL_FRAMES).T
-
-    print('vocal and nonvocal array shapes')
-    print(VOCAL_FRAMES.shape)
-    print(NONVOCAL_FRAMES.shape)
-
-    VOCAL_SIGNALS = istft(VOCAL_FRAMES, configs=configs)
-    NONVOCAL_SIGNALS = istft(NONVOCAL_FRAMES, configs=configs)
-
-    librosa.output.write_wav("vocalfinished4.wav", VOCAL_SIGNALS, sr=configs['SAMPLE_RATE'])
-    librosa.output.write_wav("nonvocalfinished4.wav", NONVOCAL_SIGNALS, sr=configs['SAMPLE_RATE'])
 
   # get test accuracies of models
   def test(self):
@@ -334,50 +124,26 @@ class BaseModel(object):
       GRAPH_WRITER.restore(SESSION, self.model_file)
 
       for EPOCH in range(10):
-        ACC = SESSION.run(self.ACCURACY)
+        DICE_LOSS = SESSION.run(self.DICE_LOSS)
         # Update the console.
-        print('Epoch %d: acc = %.8f' % (EPOCH, ACC))
+        print('Epoch %d: dice loss = %.8f' % (EPOCH, DICE_LOSS))
       COORDINATOR.request_stop()
       COORDINATOR.join(THREADS)
 
-  # for exporting the tensorflow model for tensorflow serving (not tested)
-  def export(self):
-    with tf.Session(graph=self.GRAPH) as SESSION:
-      # restore the session
-      GRAPH_WRITER = tf.train.Saver()
-      GRAPH_WRITER.restore(SESSION, self.model_file)
+  # custom loss functions
+  def dice_loss(self, y_true, y_pred):
+    smooth = 1.
+    y_true_f = tf.contrib.layers.flatten(y_true)
+    y_pred_f = tf.contrib.layers.flatten(y_pred)
+    intersection = tf.reduce_sum(y_true_f * y_pred_f, axis=1)
+    return (2. * intersection + smooth) / (tf.reduce_sum(y_true_f, axis=1) + tf.reduce_sum(y_pred_f, axis=1) + smooth)
 
-      export_path = 'Results/SavedModels/'
-      print('Exporting trained model to ', export_path)
-      builder = saved_model_builder.SavedModelBuilder(export_path)
+  def bce_dice_loss(self, y_true, y_pred):
+    return tf.contrib.keras.backend.binary_crossentropy(y_true, y_pred) + (1 - self.dice_loss(y_true, y_pred))
 
-      # input_configs = {'x': tf.FixedLenFeature(shape=[np.prod(self.fbanks_shape),], dtype=tf.float32),}
-      # tf_example = tf.parse_example(self.fbanks, input_configs)
-      # x = tf.identity(tf_example['x'], name='x')
-
-      inputs_fbanks = utils.build_tensor_info(self.fbanks)
-      outputs_d_vector = utils.build_tensor_info(self.d_vector)
-
-      prediction_signature = signature_def_utils.build_signature_def(
-        inputs={'fbanks': inputs_fbanks},
-        outputs={'d_vector': outputs_d_vector},
-        method_name=signature_constants.PREDICT_METHOD_NAME)
-
-      legacy_init_op = tf.group(tf.tables_initializer(), name='legacy_init_op')
-      builder.add_meta_graph_and_variables(
-        SESSION, [tag_constants.SERVING],
-        signature_def_map={
-          signature_constants.DEFAULT_SERVING_SIGNATURE_DEF_KEY: prediction_signature,
-        },
-        legacy_init_op=legacy_init_op)
-
-      builder.save()
-
-      print('Done Exporting!')
-
-  # inputs stuff
-  def read_inputs(self, file_paths, batch_size=64, capacity=1000, min_after_dequeue=900, num_threads=2,
-                  spectograms_shape=None, is_training=True):
+  # read inputs from tfrecords
+  def read_inputs(self, file_paths, images_shape, masks_shape, batch_size=64,
+                  capacity=1000, min_after_dequeue=900, num_threads=2, is_training=True):
 
     with tf.name_scope('input'):
       # if training we use an input queue otherwise we use placeholders
@@ -388,54 +154,23 @@ class BaseModel(object):
         # Read an example from the TFRecords file.
         _, example = reader.read(filename_queue)
         features = tf.parse_single_example(example, features={
-          'spectograms': tf.FixedLenFeature([], tf.string),
+          'images': tf.FixedLenFeature([], tf.string),
           'masks': tf.FixedLenFeature([], tf.string)
         })
         # Decode sample
-        spectogram = tf.decode_raw(features['spectograms'], tf.float64)
-        spectogram.set_shape(spectograms_shape)
-        mask = tf.decode_raw(features['masks'], tf.float64)
-        mask.set_shape(spectograms_shape)
+        image = tf.decode_raw(features['images'], tf.float32)
+        image.set_shape(images_shape)
+        mask = tf.decode_raw(features['masks'], tf.float32)
+        mask.set_shape(masks_shape)
 
-        self.spectograms, self.masks = tf.train.shuffle_batch(
-          [spectogram, mask], batch_size=batch_size,
+        self.images, self.masks = tf.train.shuffle_batch(
+          [image, mask], batch_size=batch_size,
           capacity=capacity, min_after_dequeue=min_after_dequeue, num_threads=num_threads,
         )
       else:
-        spectograms_shape = [None] + spectograms_shape
-        self.spectograms = tf.placeholder(tf.float64, shape=spectograms_shape)
-        self.masks = tf.placeholder(tf.float64, shape=spectograms_shape)
+        images_shape = [None] + images_shape
+        self.images = tf.placeholder(tf.float64, shape=images_shape)
+        masks_shape = [None] + masks_shape
+        self.masks = tf.placeholder(tf.float64, shape=masks_shape)
 
-      return self.spectograms, self.masks
-
-  def read_gen_inputs(self, file_paths, batch_size=64, capacity=1000, min_after_dequeue=900, num_threads=2,
-                  spectograms_shape=None, is_training=True):
-
-    with tf.name_scope('input'):
-      # if training we use an input queue otherwise we use placeholders
-      if is_training:
-        # Create a file name queue.
-        filename_queue = tf.train.string_input_producer(file_paths)
-        reader = tf.TFRecordReader()
-        # Read an example from the TFRecords file.
-        _, example = reader.read(filename_queue)
-        features = tf.parse_single_example(example, features={
-          'guess': tf.FixedLenFeature([], tf.string),
-          'truth': tf.FixedLenFeature([], tf.string)
-        })
-        # Decode sample
-        guesses = tf.decode_raw(features['guess'], tf.float64)
-        guesses.set_shape(spectograms_shape)
-        truths = tf.decode_raw(features['truth'], tf.float64)
-        truths.set_shape(spectograms_shape)
-
-        self.guesses, self.truths = tf.train.shuffle_batch(
-          [guesses, truths], batch_size=batch_size, num_threads=num_threads,
-          capacity=capacity, min_after_dequeue=min_after_dequeue
-        )
-      else:
-        spectograms_shape = [None] + spectograms_shape
-        self.guesses = tf.placeholder(tf.float64, shape=spectograms_shape)
-        self.truths = tf.placeholder(tf.float64, shape=spectograms_shape)
-
-      return self.guesses, self.truths
+      return self.images, self.masks

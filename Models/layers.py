@@ -17,22 +17,67 @@ def selu(x, name):
     scale = 1.0507009873554804934193349852946
     return scale*tf.where(x>=0.0, x, alpha*tf.nn.elu(x))
 
-def cnn_layer(X, shape, strides, scope, padding='SAME', is_training=True):
+def conv2d_layer(X, shape, scope, strides=(1, 1, 1, 1), layer_count=0, padding='SAME', is_training=True, act_func=tf.nn.relu):
   '''
-  Create a convolution layer.
+  Create a convolution layer. Remember shape is [filter_height, filter_width, in_channels, out_channels]
   '''
 
   kernel = variable_on_cpu(
-    'kernel', shape, tf.contrib.layers.xavier_initializer(dtype=tf.float32), is_training=is_training
+    'kernel' + str(layer_count), shape, tf.contrib.layers.xavier_initializer(dtype=tf.float32), is_training=is_training
   )
   conv = tf.nn.conv2d(X, kernel, strides, padding=padding)
-  biases = variable_on_cpu('b', [shape[-1]], tf.constant_initializer(0.0), is_training=is_training)
-  activation = tf.nn.relu(conv + biases, name=scope.name)
-  tf.summary.histogram('{}/activations'.format(scope.name), activation)
+  biases = variable_on_cpu('b' + str(layer_count), [shape[-1]], tf.constant_initializer(0.0), is_training=is_training)
+  activation = act_func(conv + biases, name=scope.name + str(layer_count))
+  tf.summary.histogram('{}/activations'.format(scope.name + str(layer_count)), activation)
   tf.summary.scalar(
-    '{}/sparsity'.format(scope.name), tf.nn.zero_fraction(activation)
+    '{}/sparsity'.format(scope.name + str(layer_count)), tf.nn.zero_fraction(activation)
   )
   return activation
+
+def upsampling_2d_layer(X, size, name):
+  H, W, _ = X.get_shape().as_list()[1:]
+  H_multi, W_multi = size
+  target_H = H * H_multi
+  target_W = W * W_multi
+  return tf.image.resize_nearest_neighbor(X, (target_H, target_W), name="upsample_"+name)
+
+def max_pool_layer(X, window_size, strides, scope, padding='SAME'):
+  '''
+  Create a max pooling layer.
+  '''
+
+  return tf.nn.max_pool(X, ksize=window_size, strides=strides,
+                        padding=padding, name=scope.name)
+
+def unet_down_layer_group(X, scope_name, filter_size, act_func, is_training):
+  with tf.variable_scope(scope_name) as scope:
+    down = conv2d_layer(X, shape=[filter_size, filter_size, 3, 3], scope=scope,
+                          layer_count=1, act_func=act_func, is_training=is_training)
+    down = conv2d_layer(down, shape=[filter_size, filter_size, 3, 3], scope=scope,
+                          layer_count=2, act_func=act_func, is_training=is_training)
+    down_pool = max_pool_layer(down, window_size=(1, 2, 2, 1), strides=(1, 2, 2, 1), scope=scope)
+  return down, down_pool
+
+def unet_center_layer_group(X, scope_name, filter_size, act_func, is_training):
+  with tf.variable_scope(scope_name) as scope:
+    center = conv2d_layer(X, shape=[filter_size, filter_size, 3, 3], scope=scope,
+                          layer_count=1, act_func=act_func, is_training=is_training)
+    center = conv2d_layer(center, shape=[filter_size, filter_size, 3, 3], scope=scope,
+                          layer_count=2, act_func=act_func, is_training=is_training)
+  return center
+
+def unet_up_layer_group(X, scope_name, filter_size, act_func, is_training, mirror_down):
+  with tf.variable_scope(scope_name) as scope:
+    up = upsampling_2d_layer(X, (2, 2), name=scope.name)
+    up = tf.concat([mirror_down, up], axis=-1, name="concat_" + scope.name)
+    up = conv2d_layer(up, shape=[filter_size, filter_size, 6, 3], scope=scope,
+                       layer_count=1, act_func=act_func, is_training=is_training)
+    up = conv2d_layer(up, shape=[filter_size, filter_size, 3, 3], scope=scope,
+                       layer_count=2, act_func=act_func, is_training=is_training)
+    up = conv2d_layer(up, shape=[filter_size, filter_size, 3, 3], scope=scope,
+                       layer_count=3, act_func=act_func, is_training=is_training)
+  return up
+
 
 def fc_layer(X, n_in, n_out, scope, is_training=True, act_func=None):
   '''
@@ -55,7 +100,7 @@ def fc_layer(X, n_in, n_out, scope, is_training=True, act_func=None):
 
 def fc_dropout_layer(X, n_in, n_out, scope, keep_prob, is_training=True, act_func=None):
   '''
-  Create a fully connected (multi-layer perceptron) layer.
+  Create a fully connected (multi-layer perceptron) layer, with dropout
   '''
 
   weights = variable_on_cpu(
@@ -98,7 +143,6 @@ def fc_bn_layer(X, n_in, n_out, scope, is_training=True, act_func=None):
 def lstm_layer(size):
     '''
     Create an LSTM layer
-    :return:
     '''
 
     return tf.contrib.rnn.BasicLSTMCell(size, forget_bias=0.0, state_is_tuple=True)
@@ -106,7 +150,6 @@ def lstm_layer(size):
 def lstm_dropout_layer(input, size, keep_prob, num_of_lstm_cells=1):
     '''
     Create an LSTM layer with dropout
-    :return:
     '''
     all_lstm_cells = []
     for _ in range(num_of_lstm_cells):
@@ -123,21 +166,3 @@ def lstm_dropout_layer(input, size, keep_prob, num_of_lstm_cells=1):
     outputs, _ = tf.contrib.rnn.static_rnn(final_lstm_cell, input, dtype=tf.float32)
 
     return outputs
-
-def pool_layer(X, window_size, strides, scope, padding='SAME'):
-  '''
-  Create a max pooling layer.
-  '''
-
-  return tf.nn.max_pool(X, ksize=window_size, strides=strides,
-                        padding=padding, name=scope.name)
-
-def average_frames(input, stack_size):
-  '''
-  Average Frames
-  '''
-  Y = []
-  nrows = input.shape[0] / stack_size
-  for each in range(input.shape[1]):
-
-    Y[each] = np.mean()
