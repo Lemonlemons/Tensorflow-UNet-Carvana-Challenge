@@ -28,11 +28,11 @@ class BaseModel(object):
     self.is_testing = self.mode == 'test'
     self.input_file = input_file
     if self.is_testing or self.is_training:
-      self.batch_size = 6
+      self.batch_size = 4
     else:
       self.batch_size = 1
     self.num_batches = 9 # int(training_count/self.batch_size)
-    self.num_epochs = 2000
+    self.num_epochs = 1500
     self.learning_rate = 1e-5
 
     self.input_pipeline_threads = 2

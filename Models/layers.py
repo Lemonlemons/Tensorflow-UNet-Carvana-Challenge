@@ -49,32 +49,33 @@ def max_pool_layer(X, window_size, strides, scope, padding='SAME'):
   return tf.nn.max_pool(X, ksize=window_size, strides=strides,
                         padding=padding, name=scope.name)
 
-def unet_down_layer_group(X, scope_name, filter_size, act_func, is_training):
+def unet_down_layer_group(X, scope_name, features_start, features_end, act_func, is_training):
   with tf.variable_scope(scope_name) as scope:
-    down = conv2d_layer(X, shape=[filter_size, filter_size, 3, 3], scope=scope,
+    down = conv2d_layer(X, shape=[3, 3, features_start, features_end], scope=scope,
                           layer_count=1, act_func=act_func, is_training=is_training)
-    down = conv2d_layer(down, shape=[filter_size, filter_size, 3, 3], scope=scope,
+    down = conv2d_layer(down, shape=[3, 3, features_end, features_end], scope=scope,
                           layer_count=2, act_func=act_func, is_training=is_training)
     down_pool = max_pool_layer(down, window_size=(1, 2, 2, 1), strides=(1, 2, 2, 1), scope=scope)
   return down, down_pool
 
-def unet_center_layer_group(X, scope_name, filter_size, act_func, is_training):
+def unet_center_layer_group(X, scope_name, features_start, features_end, act_func, is_training):
   with tf.variable_scope(scope_name) as scope:
-    center = conv2d_layer(X, shape=[filter_size, filter_size, 3, 3], scope=scope,
+    center = conv2d_layer(X, shape=[3, 3, features_start, features_end], scope=scope,
                           layer_count=1, act_func=act_func, is_training=is_training)
-    center = conv2d_layer(center, shape=[filter_size, filter_size, 3, 3], scope=scope,
+    center = conv2d_layer(center, shape=[3, 3, features_end, features_end], scope=scope,
                           layer_count=2, act_func=act_func, is_training=is_training)
   return center
 
-def unet_up_layer_group(X, scope_name, filter_size, act_func, is_training, mirror_down):
+def unet_up_layer_group(X, scope_name, features_start, features_end, act_func, is_training, mirror_down):
   with tf.variable_scope(scope_name) as scope:
     up = upsampling_2d_layer(X, (2, 2), name=scope.name)
     up = tf.concat([mirror_down, up], axis=-1, name="concat_" + scope.name)
-    up = conv2d_layer(up, shape=[filter_size, filter_size, 6, 3], scope=scope,
+    features_start = features_start + int(mirror_down.shape[-1])
+    up = conv2d_layer(up, shape=[3, 3, features_start, features_end], scope=scope,
                        layer_count=1, act_func=act_func, is_training=is_training)
-    up = conv2d_layer(up, shape=[filter_size, filter_size, 3, 3], scope=scope,
+    up = conv2d_layer(up, shape=[3, 3, features_end, features_end], scope=scope,
                        layer_count=2, act_func=act_func, is_training=is_training)
-    up = conv2d_layer(up, shape=[filter_size, filter_size, 3, 3], scope=scope,
+    up = conv2d_layer(up, shape=[3, 3, features_end, features_end], scope=scope,
                        layer_count=3, act_func=act_func, is_training=is_training)
   return up
 
