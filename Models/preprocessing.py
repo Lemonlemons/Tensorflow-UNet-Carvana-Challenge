@@ -34,25 +34,21 @@ def prepare_train_and_test_data(configs, args, input_size):
   test_path = configs['TF_RECORDS_TEST']
   meta_path = configs['TF_RECORDS_META']
 
-  # If the data hasn't been preprocessed, then do it now.
-  if not os.path.exists(train_path) \
-      or not os.path.exists(test_path) \
-      or not os.path.exists(meta_path):
-    print('Preparing Training and Testing Data')
+  print('Preparing Training and Testing Data')
 
-    df_train = pd.read_csv(args.data_location + '/train_masks.csv')
-    ids_train = df_train['img'].map(lambda s: s.split('.')[0])
+  df_train = pd.read_csv(args.data_location + '/train_masks.csv')
+  ids_train = df_train['img'].map(lambda s: s.split('.')[0])
 
-    ids_train_split, ids_test_split = train_test_split(ids_train, test_size=0.2, random_state=43)
+  ids_train_split, ids_test_split = train_test_split(ids_train, test_size=0.2, random_state=43)
 
-    # Write the training set.
-    training_count = prepare_unet_tfrecord(train_path, args, ids_train_split, input_size)
+  # Write the training set.
+  training_count = prepare_unet_tfrecord(train_path, args, ids_train_split, input_size)
 
-    # Write the testing set.
-    test_count = prepare_unet_tfrecord(test_path, args, ids_test_split, input_size)
+  # Write the testing set.
+  test_count = prepare_unet_tfrecord(test_path, args, ids_test_split, input_size)
 
-    with open(meta_path, 'w') as OUTPUT:
-      OUTPUT.write('{},{}'.format(training_count, test_count))
+  with open(meta_path, 'w') as OUTPUT:
+    OUTPUT.write('{},{}'.format(training_count, test_count))
 
   print('preprocessing completed')
 
@@ -70,7 +66,7 @@ def randomShiftScaleRotate(image, mask,
                            shift_limit=(-0.0625, 0.0625),
                            scale_limit=(-0.1, 0.1),
                            rotate_limit=(-45, 45), aspect_limit=(0, 0),
-                           borderMode=cv2.BORDER_CONSTANT, u=0.5):
+                           borderMode=cv2.BORDER_CONSTANT, u=0.4):
   if np.random.random() < u:
     height, width, channel = image.shape
 
@@ -104,7 +100,7 @@ def randomShiftScaleRotate(image, mask,
 
   return image, mask
 
-def randomHorizontalFlip(image, mask, u=0.5):
+def randomHorizontalFlip(image, mask, u=0.4):
   if np.random.random() < u:
     image = cv2.flip(image, 1)
     mask = cv2.flip(mask, 1)
