@@ -24,7 +24,7 @@ def main(argv):
     'TF_RECORDS_META': os.path.join(args.data_location, 'unet.meta'),
     'INPUT_SIZE': int(args.model[4:]),
     'BATCH_SIZE': 8,
-    'LEARNING_RATE': 0.001,
+    'LEARNING_RATE': 0.01,
     'NUMBER_OF_EPOCHS': 100
   }
 

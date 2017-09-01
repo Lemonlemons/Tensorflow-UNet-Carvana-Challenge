@@ -50,7 +50,7 @@ def conv2d_bn_layer(X, shape, scope, strides=(1, 1, 1, 1), layer_count=0, paddin
   if act_func is not None:
     activation = act_func(activation, name=scope.name + str(layer_count))
     tf.summary.histogram('{}/activations'.format(scope.name + str(layer_count)), activation)
-  # activation = tf.contrib.layers.batch_norm(activation, fused=True, data_format="NHWC")
+  activation = tf.contrib.layers.batch_norm(activation, fused=True, data_format="NHWC")
   tf.summary.scalar(
     '{}/sparsity'.format(scope.name + str(layer_count)), tf.nn.zero_fraction(activation)
   )
@@ -75,7 +75,7 @@ def max_pool_layer(X, window_size, strides, scope, padding='SAME'):
   return tf.nn.max_pool(X, ksize=window_size, strides=strides,
                         padding=padding, name=scope.name)
 
-def unet_down_layer_group(X, scope_name, features_start, features_end, act_func, is_training):
+def unet_down_layer_group(X, scope_name, features_start, features_end, act_func=tf.nn.relu, is_training=True):
   with tf.variable_scope(scope_name) as scope:
     down = conv2d_bn_layer(X, shape=[3, 3, features_start, features_end], scope=scope,
                           layer_count=1, act_func=act_func, is_training=is_training)
@@ -84,7 +84,7 @@ def unet_down_layer_group(X, scope_name, features_start, features_end, act_func,
     down_pool = max_pool_layer(down, window_size=(1, 2, 2, 1), strides=(1, 2, 2, 1), scope=scope)
   return down, down_pool
 
-def unet_center_layer_group(X, scope_name, features_start, features_end, act_func, is_training):
+def unet_center_layer_group(X, scope_name, features_start, features_end, act_func=tf.nn.relu, is_training=True):
   with tf.variable_scope(scope_name) as scope:
     center = conv2d_bn_layer(X, shape=[3, 3, features_start, features_end], scope=scope,
                           layer_count=1, act_func=act_func, is_training=is_training)
@@ -92,7 +92,7 @@ def unet_center_layer_group(X, scope_name, features_start, features_end, act_fun
                           layer_count=2, act_func=act_func, is_training=is_training)
   return center
 
-def unet_up_layer_group(X, scope_name, features_start, features_end, act_func, is_training, mirror_down):
+def unet_up_layer_group(X, scope_name, features_start, features_end, act_func=tf.nn.relu, is_training=True, mirror_down=None):
   with tf.variable_scope(scope_name) as scope:
     up = upsampling_2d_layer(X, (2, 2), name=scope.name)
     up = tf.concat([mirror_down, up], axis=-1, name="concat_" + scope.name)

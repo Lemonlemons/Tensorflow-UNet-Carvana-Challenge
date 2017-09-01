@@ -17,6 +17,7 @@ from .preprocessing import *
 import requests
 import cv2
 from tqdm import tqdm
+import pandas as pd
 
 
 class BaseModel(object):
@@ -36,9 +37,10 @@ class BaseModel(object):
 
     self.batch_size = configs['BATCH_SIZE']
 
-    self.num_batches = int(np.ceil(float(training_count)/float(self.batch_size)))
-    self.num_epochs = configs['NUMBER_OF_EPOCHS']
-    self.stagnent_epochs_threshold = 6
+    self.visual_progress_factor = 5
+    self.num_batches = int(np.ceil(float(training_count)/float(self.batch_size)) / self.visual_progress_factor)
+    self.num_epochs = configs['NUMBER_OF_EPOCHS'] * self.visual_progress_factor
+    self.stagnent_epochs_threshold = 6 * self.visual_progress_factor
     self.stagnent_lr_factor = 0.1
     self.lr = configs['LEARNING_RATE']
 
@@ -94,20 +96,12 @@ class BaseModel(object):
         DURATION = 0
         ERROR = 0.0
         START_TIME = time.time()
-        ACCS = []
         for MINI_BATCH in range(self.num_batches):
           _, SUMMARIES, COST_VAL, DICE_LOSS = SESSION.run([
             self.APPLY_GRADIENT_OP, self.SUMMARIES_OP, self.COST, self.DICE_LOSS
           ], feed_dict={self.learning_rate: LEARNING_RATE})
           ERROR += COST_VAL
           GLOBAL_STEP += 1
-          ACCS.append(DICE_LOSS)
-          if len(ACCS) >= 3:
-            AVG_DICE_LOSS = np.mean(ACCS)
-            if AVG_DICE_LOSS > BEST_DICE_LOSS:
-              BEST_DICE_LOSS = AVG_DICE_LOSS
-              print('Saving Session, loss: ' + str(BEST_DICE_LOSS))
-              GRAPH_SAVER.save(SESSION, self.model_file)
 
         # Write the summaries to disk.
         SUMMARY_WRITER.add_summary(SUMMARIES, EPOCH)
@@ -118,15 +112,18 @@ class BaseModel(object):
         # Check for stagnent epochs
         if DICE_LOSS > BEST_DICE_LOSS:
           STAGNENT_EPOCHS = 0
+          BEST_DICE_LOSS = DICE_LOSS
+          print('Saving Session, loss: ' + str(BEST_DICE_LOSS))
+          GRAPH_SAVER.save(SESSION, self.model_file)
         else:
           STAGNENT_EPOCHS += 1
         # Check if there is a learning plateau and the LR should be decreased
         if STAGNENT_EPOCHS >= self.stagnent_epochs_threshold:
-          print("Reducing learning rate")
           LEARNING_RATE = LEARNING_RATE * self.stagnent_lr_factor
+          print("Reducing learning rate to: " + str(LEARNING_RATE))
           STAGNENT_EPOCHS = 0
         # Check if loss is good enough to end early
-        if EPOCH == self.num_epochs or DICE_LOSS > 0.997:
+        if EPOCH + 1 == self.num_epochs or DICE_LOSS > 0.997:
           print(
             'Done training for %d epochs. (%.3f sec) total steps %d' % (EPOCH, TOTAL_DURATION, GLOBAL_STEP)
           )
@@ -187,7 +184,7 @@ class BaseModel(object):
         x_batch = []
         end = min(start + self.batch_size, len(ids_test))
         ids_test_batch = ids_test[start:end]
-        for id in ids_test_batch.values:
+        for index, id in enumerate(ids_test_batch.values):
           img = cv2.imread('input/test/{}.jpg'.format(id))
           img = cv2.resize(img, (configs['INPUT_SIZE'], configs['INPUT_SIZE']))
           x_batch.append(img)
@@ -195,9 +192,10 @@ class BaseModel(object):
         x_batch = np.reshape(x_batch, [self.batch_size, np.prod(self.image_input_shape)])
         preds = SESSION.run(self.Y, feed_dict={self.images: x_batch})
         preds = np.squeeze(preds, axis=-1)
-        for pred in preds:
+        for index, pred in enumerate(preds):
           prob = cv2.resize(pred, (orig_width, orig_height))
           mask = prob > threshold
+          # cv2.imwrite("temp_post_"+str(index)+".jpg", mask)
           rle = self.run_length_encode(mask)
           rles.append(rle)
     print("Generating submission file...")
