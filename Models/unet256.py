@@ -64,7 +64,7 @@ class Unet256(BaseModel):
       tf.summary.scalar("dice loss", self.DICE_LOSS)
 
       # Compute gradients.
-      OPTIMIZER = tf.train.MomentumOptimizer(self.learning_rate, momentum=0.9)
+      OPTIMIZER = tf.train.RMSPropOptimizer(self.learning_rate)
       GRADIENTS = OPTIMIZER.compute_gradients(self.COST)
 
       # Apply gradients.
