@@ -23,16 +23,16 @@ then running this command in the train_masks directory
 ` magick mogrify -format png *.gif` 
 
 ### Preprocessing and creating .tfrecords for easy consumption
-Run ``
+Run `python main.py --phase preprocess --model unet1024`
 
 ### Train
-Run ``
+Run `python main.py --phase train --model unet1024`
 
 ### Test
-Run ``
+Run `python main.py --phase test --model unet1024`
 
 ### Create submission
-Run `` 
+Run `python main.py --phase submission --model unet1024` 
 
 ## any questions? :jack_o_lantern:
 Contact Lemonlemons (Andrew Moe) (RedHerring on Kaggle)

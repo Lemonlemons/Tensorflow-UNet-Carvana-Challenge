@@ -2,3 +2,5 @@
 .idea/
 input/*
 *.wav
+*/.DS_Store
+.DS_Store
